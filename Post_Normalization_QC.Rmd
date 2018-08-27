@@ -1,0 +1,711 @@
+Post Normalization Repeat of Quality Control Steps
+========================================================
+  
+## Libraries
+```{r}
+setwd("/big_data/redgar/PAWS/PAWS_final")
+library(reshape)
+library(ggplot2)
+library(RColorBrewer)
+library(mclust)
+library(IlluminaHumanMethylation450k.db)
+library(grid)
+library(gridExtra)
+```
+
+#### Normalized (BMIQ and probe filtered)
+```{r}
+load("PAWS_Beta_norm_filtered.RData")
+```
+
+#### Cluster function
+```{r}
+# plot clustering with color function
+plotHclustColors <- function(matrix,leafcolor) {
+  colnames(matrix) <- leafcolor
+  d <- dist(t(matrix))
+  hc <- hclust(d, method = "complete") #single, complete, average, ward
+  color<-rep(brewer.pal(12,"Paired"),ceiling(length(unique(leafcolor))/12))
+  labelColors <- color[sample(1:length(color),length(unique(leafcolor)))]
+  colLab <- function(n) {
+    if (is.leaf(n)) {
+      a <- attributes(n)
+      labCol <- labelColors[which(unique(leafcolor) == a$label)]
+      attr(n, "nodePar") <- c(a$nodePar, lab.col=labCol)
+    }
+    n
+  }
+  clusDendro <- dendrapply(as.dendrogram(hc), colLab)
+  plot(clusDendro)
+}
+```
+
+
+#### Any meta data
+```{r}
+metaog<-read.csv("PAWS_sample_info_with_replicates.csv")
+metaog$X<-NULL
+meta2015<-read.csv("PAWS-GdatasetforKoborlabJan2015-.csv")
+meta2015<-meta2015[match(metaog$Psy_ID, meta2015$PAWSG_ID),]
+meta2015$Meth_ID<-metaog$Meth_ID
+meta2015<-meta2015[,c(1,106, 2:105)]
+
+meta<-meta2015
+
+meta<-meta[which(meta$Meth_ID%in%colnames(PAWS_Beta)),]
+meta<-meta[match(colnames(PAWS_Beta), meta$Meth_ID),]
+
+# add genetic cluster to meta from PLINK
+Paws_plink_clusters<-read.csv("plink.cluster3.csv", sep="\t")
+Paws_plink_four_clusters<-Paws_plink_clusters[,c(2,191)]
+colnames(Paws_plink_four_clusters)<-c("Sample_ID","Genetic_cluster")
+Paws_plink_four_clusters$Sample_ID<-as.character(Paws_plink_four_clusters$Sample_ID)
+Paws_plink_four_clusters$Sample_ID[which(Paws_plink_four_clusters$Sample_ID=="10_9630002082_R10C02")]<-"186"
+Paws_plink_four_clusters$Sample_ID[which(Paws_plink_four_clusters$Sample_ID=="10_9630002082_R08C02")]<-"10"
+one<-data.frame(Sample_ID=1, Genetic_cluster=0)#add 1 (paws skipped but impute based on dechhieth 4 is 90% 0)
+Paws_plink_four_clusters<-rbind(Paws_plink_four_clusters, one)
+meta<-merge(meta, Paws_plink_four_clusters, by.x="PAWSG_ID", by.y="Sample_ID")
+
+#add sentrix to meta
+sentrix<-read.csv("2014-09-03_pawsSampleSheet_all.csv")
+sentrix<-sentrix[,c(1,2,3,6,7)]
+rename<-c("3","3F","34","32F","32")
+sentrix$Sample_Name<-as.character(sentrix$Sample_Name)
+sentrix$Sample_Name[which(sentrix$Sample_Name%in%rename)]
+sentrix$Sample_Name[which(sentrix$Sample_Name%in%rename)]<-c("26Fn","34Fn","3n","34n","26n")
+meta<-merge(meta, sentrix, by.x="Meth_ID", by.y="Sample_Name")
+
+# want to express sentrix ID as just the row (12 rows)
+rows<-c("A","B","C", "D","E","F","G","H")
+wells_in_rows<-lapply(rows, function(row) unlist(sapply(c("01","02","03","04","05","06","07","08","09","10","11","12"), function(col) paste(row,col, sep=""))))
+wells_in_rows<-as.data.frame(do.call(rbind, wells_in_rows))
+meta$plate_row<-sapply(1:nrow(meta), function(well) c(1:12)[apply(wells_in_rows,MARGIN=2,function(x) meta$Sample_Well[well]%in%x)])
+meta$plate_row<-sapply(meta$plate_row, function(x) if(length(meta$plate_row[x])==0){NA}else{meta$plate_row[x]})
+meta$plate_row<-as.factor(unlist(meta$plate_row))
+
+```
+
+### Confirm Twin IDS and add to meta data
+```{r}
+### Bring methylumin back in so can check the 65 SNPs on the twins
+load("PAWS_methlylumi.RData")
+#Sample Changes
+Bad_Meth_IDs<-c("100M","40F","109M","120M","95F","92M","134F","136M","50F","167M","26M","31F","27M","27","41_R1","41_R2","34F","60F")
+rename<-c("3","3F","34","32F","32")
+#filter bad
+PAWS.2 <- PAWS.2[,!sampleNames(PAWS.2)%in%Bad_Meth_IDs]#485577 192
+#Rename
+sampleNames(PAWS.2)[which(sampleNames(PAWS.2)%in%rename)]
+sampleNames(PAWS.2)[which(sampleNames(PAWS.2)%in%rename)]<-c("26Fn","34Fn","3n","34n","26n")
+
+PAWS<-PAWS.2
+dim(PAWS) # 485577      192 
+
+# Pull out SNP Probes
+PAWS_Snps <- PAWS[substring(featureNames(PAWS),1,2) == "rs", ]
+PAWS_Snps_betas<-betas(PAWS_Snps)
+
+### load in the twin data
+Twin_form_nicki<-read.csv("PAWS-Twin-Data.csv")
+
+meta$PAWSG_ID[which(meta$Meth_ID%in%Bad_Meth_IDs)]
+twin<-c(Twin_form_nicki$PAWS.G.ID, Twin_form_nicki$PAWS.G.ID.1)
+Pair<-c("TW1","TW2","SB1","TW3","SB2","SB3","TW4","TW5","SB4","TW6","TW7","TW8","TW9",
+        "TW1","TW2","SB1","TW3","SB2","SB3","TW4","TW5","SB4","TW6","TW7","TW8","TW9")
+fam<-data.frame(Pair, twin)
+twin<-fam[which(fam$Pair%in%c("TW1","TW2","TW3","TW4","TW5","TW6","TW7","TW8","TW9")),]
+fam_ID<-sapply(1:nrow(meta), function(x) if(meta$PAWSG_ID[x]%in%fam$twin){as.character(fam$Pair)[which(fam$twin==meta$PAWSG_ID[x])]}else{NA})
+twin_ID<-sapply(1:nrow(meta), function(x) if(meta$PAWSG_ID[x]%in%twin$twin){as.character(twin$Pair)[which(twin$twin==meta$PAWSG_ID[x])]}else{NA})
+
+meta$Fam_ID<-fam_ID
+meta$TWIN_Pair<-twin_ID
+
+
+PAWS_Snps_betas_clust<-PAWS_Snps_betas[,which(colnames(PAWS_Snps_betas)%in%meta$Meth_ID)]
+PAWS_Snps_betas_clust<-PAWS_Snps_betas_clust[,match(meta$Meth_ID, colnames(PAWS_Snps_betas_clust))]
+meta[, c(2,113:114)]
+plotHclustColors(PAWS_Snps_betas_clust, meta$Fam_ID) #all samples
+
+## Psychip clustering
+load("PAWS_snps_Ballelefreq.RData")
+SNPs<-PAWS_snps_casted[complete.cases(PAWS_snps_casted),2:ncol(PAWS_snps_casted)] #554034 SNPs
+SNPs<-SNPs[,which(colnames(SNPs)%in%meta$PAWSG_ID)]
+meta_ordered<-meta[which(meta$PAWSG_ID%in%colnames(SNPs)),]
+meta_ordered<-meta_ordered[!duplicated(meta_ordered), ]
+meta_ordered<-meta_ordered[match(colnames(SNPs), meta_ordered$PAWSG_ID),]
+SNPs_sample<-SNPs[sample(1:nrow(SNPs), 10000),]
+SNPs_sample<-as.data.frame(SNPs_sample)
+plotHclustColors(SNPs_sample, meta_ordered$Fam_ID) #all samples
+
+
+save(meta, file="PAWS_meta_sentrix_genetic_clusters.RData")
+```
+
+
+
+
+
+
+
+
+
+## Load Data
+#### Normalized (BMIQ and probe filtered)
+```{r}
+load("PAWS_Beta_norm_filtered.RData") #192 samples 428407    
+load("PAWS_meta_sentrix_genetic_clusters.RData")# with the 2015 data Nicki sent
+meta<-meta[which(meta$Meth_ID%in%colnames(PAWS_Beta)),]
+meta<-meta[match(colnames(PAWS_Beta), meta$Meth_ID),]
+```
+
+# Sample CpGs for plotting and clustering
+```{r}
+Beta_sample<-PAWS_Beta[sample(1:nrow(PAWS_Beta), 10000),]
+```
+
+
+## Beta distribtuions 
+looking good? Take just a random sample of CpGs for plotting (otherwise so slow)
+```{r fig.width=10, fig.height=6}
+Beta_sample_melted<- melt(Beta_sample)
+#remove NAs before plotting (otherwise get many non-inifnite warnings)
+Beta_Plot<-Beta_sample_melted[which(!(is.na(Beta_sample_melted$value))),]
+#add meta
+Beta_Plot<-merge(Beta_Plot,meta, by.x="variable", by.y="Meth_ID")
+col<-colorRampPalette(brewer.pal(11,"RdYlGn")[1:8])(4)
+
+ggplot(Beta_Plot, aes(value, group=variable, color=Genetic_cluster))+
+  geom_density()+theme_bw()+scale_color_manual(values=col)
+```
+
+
+# Clustering By Any Meta Data variable
+```{r fig.width=10, fig.height=3}
+# remove rows with NAs
+beta_cluster<-Beta_sample[complete.cases(Beta_sample),]
+
+# Plot
+plotHclustColors(beta_cluster, meta$Genetic_cluster) #all samples
+plotHclustColors(beta_cluster, meta$Fam_ID) #all samples
+
+```
+
+
+
+
+
+##calculate Tcell proportion (GEO files from Tcells_immunomagnetic_age_matched_PAWS.Rmd) 92 Tcell samples
+```{r}
+
+######## Tcell
+load("GSE53191.RData")
+GSE53191<-GEO[[1]]
+GSE53191<-GSE53191[which(rownames(GSE53191)%in%rownames(PAWS_Beta)),]
+
+load("GSE50222.RData")
+GSE50222<-GEO[[1]]
+GSE50222<-GSE50222[which(rownames(GSE50222)%in%rownames(PAWS_Beta)),]
+
+## filter to the smallest number of CpGs
+GSE53191<-GSE53191[which(rownames(GSE53191)%in%rownames(PAWS_Beta)),]
+GSE50222<-GSE50222[which(rownames(GSE50222)%in%rownames(PAWS_Beta)),]
+
+
+meta_tcell<-data.frame(series_id=c(rep("T cells (GSE53191)",12),rep("T cells (GSE50222)",32)),
+                 gsm=c(colnames(GSE53191), colnames(GSE50222)),
+                 tissue="Tcell",
+                 deinc2dep=NA,
+                 HGHEDLV2=NA,
+                 FADV_6=NA,
+                 Genetic_cluster=NA)
+
+GEO_betas_tcell<-cbind(GSE53191, GSE50222)
+
+##### BLOOD
+load("GEO_PAWS_aged_matched_whole_blood.RData")
+
+GEO_betas<-GEO_betas[which(rownames(GEO_betas)%in%rownames(PAWS_Beta)),]
+PAWS_GEO_meta<-PAWS_GEO_meta[,c(1,2,4)]
+PAWS_GEO_meta$series_id<-c(rep("Whole Blood (GSE41169)", 31),rep("Whole Blood (GSE52113)", 6))
+PAWS_GEO_meta$deinc2dep<-NA
+PAWS_GEO_meta$HGHEDLV2<-NA
+PAWS_GEO_meta$FADV_6<-NA
+PAWS_GEO_meta$Genetic_cluster<-NA
+PAWS_GEO_meta$tissue<-"Whole Blood"
+
+
+# add tcells to paws
+Paws_meta<-meta[,c(1,8,32,20,36,107)]
+Paws_meta$series_id<-"Buccal (PAWS)"
+Paws_meta$tissue<-"Buccal"
+Paws_meta<-Paws_meta[,c(7,1,8,3,4,5,6)]
+colnames(Paws_meta)<-c("series_id","gsm","tissue","deinc2dep","HGHEDLV2","FADV_6","Genetic_cluster")
+
+
+GEO_PAWS_meta<-rbind(Paws_meta, meta_tcell,PAWS_GEO_meta)
+GEO_PAWS_beta<-cbind(PAWS_Beta, GEO_betas_tcell, GEO_betas)
+
+save(GEO_PAWS_beta, GEO_PAWS_meta, file="Blood_Tcell_data_with_PAWS.RData")
+
+
+
+
+
+### PLot whole blood, t cell and PAWS buccals
+load("Blood_Tcell_data_with_PAWS.RData")
+
+#PCA
+PCA_full_geo<-princomp(na.omit(GEO_PAWS_beta))
+Loadings_geo<-as.data.frame(unclass(PCA_full_geo$loadings))
+vars <- PCA_full_geo$sdev^2 
+vars <- vars/sum(vars) 
+
+## plot
+ggplot(Loadings_geo,aes(Comp.1,Comp.2, fill=GEO_PAWS_meta$series_id))+
+  geom_point(shape=21, color="black",size=4)+
+  theme_bw()+
+  scale_fill_manual(values=c("#1d91c0","#9970ab","#c2a5cf","#d9f0a3","#41ab5d"),name="Dataset")+
+  xlab("Component 1 (92%)")+ylab("Component 2 (6%)")
+
+# stat
+##Check is comp2 as a proxy for blood is correlated with anything
+cor.test(Loadings_geo$Comp.2, GEO_PAWS_meta$deinc2dep, method="spearman")
+cor.test(Loadings_geo$Comp.2, GEO_PAWS_meta$FADV_6, method="spearman")
+cor.test(Loadings_geo$Comp.2, GEO_PAWS_meta$HGHEDLV2, method="spearman")
+summary(aov(Loadings_geo$Comp.2~ GEO_PAWS_meta$Genetic_cluster))
+```
+
+
+
+# HEAT PLOT SCREE
+```{r}
+### Function of association meta variable with PC (ANOVA)
+heat_scree_plot<-function(Loadings, Importance){
+  adjust<-1-Importance[1]
+  pca_adjusted<-Importance[2:length(Importance)]/adjust
+  pca_df<-data.frame(adjusted_variance=pca_adjusted, PC=seq(1:length(pca_adjusted)))
+  
+  scree<-ggplot(pca_df[which(pca_df$PC<25),],aes(PC,adjusted_variance))+geom_bar(stat = "identity",color="black",fill="grey")+theme_bw()+
+    theme(axis.text = element_text(size =12),
+          axis.title = element_text(size =15),
+          plot.margin=unit(c(1,1.5,0.2,2.25),"cm"))+ylab("Adjusted Variance")+
+    scale_x_continuous(breaks = seq(1,24,1))
+  
+  #### Heat
+  ## correlate meta with PCS
+  ## Run anova of each PC on each meta data variable
+  
+  aov_PC_meta<-lapply(1:ncol(meta_categorical), function(covar) sapply(1:ncol(Loadings), function(PC) summary(aov(Loadings[,PC]~meta_categorical[,covar]))[[1]]$"Pr(>F)"[1]))
+  cor_PC_meta<-lapply(1:ncol(meta_continuous), function(covar) sapply(1:ncol(Loadings), function(PC) suppressWarnings(cor.test(Loadings[,PC],as.numeric(meta_continuous[,covar]),alternative = "two.sided", method="spearman", na.action=na.omit)$p.value)))
+  names(aov_PC_meta)<-colnames(meta_categorical)
+  names(cor_PC_meta)<-colnames(meta_continuous)
+  aov_PC_meta<-do.call(rbind, aov_PC_meta)
+  cor_PC_meta<-do.call(rbind, cor_PC_meta)
+  aov_PC_meta<-rbind(aov_PC_meta, cor_PC_meta)
+  aov_PC_meta<-as.data.frame(aov_PC_meta)
+  #adjust
+  aov_PC_meta_adjust<-aov_PC_meta[,2:ncol(aov_PC_meta)]
+  
+  #reshape
+  avo<-aov_PC_meta_adjust[,1:24]
+  avo_heat_num<-apply(avo,2, as.numeric)
+  avo_heat<-as.data.frame(avo_heat_num)
+  colnames(avo_heat)<-sapply(1:24, function(x) paste("PC",x, sep=""))
+  avo_heat$meta<-rownames(avo)
+  avo_heat_melt<-melt(avo_heat, id=c("meta"))
+  
+  # cluster meta data
+  meta_var_order<-unique(avo_heat_melt$meta)[rev(ord)]
+  avo_heat_melt$meta <- factor(avo_heat_melt$meta, levels = meta_var_order)
+  
+  # color if sig
+  # avo_heat_melt$Pvalue<-sapply(1:nrow(avo_heat_melt), function(x) if(avo_heat_melt$value[x]>=0.9){">=0.9"}else{
+  # if(avo_heat_melt$value[x]>=0.5){">=0.5"}else{
+  # if(avo_heat_melt$value[x]>=0.1){">=0.1"}else{"<0.1"}}})
+  avo_heat_melt$Pvalue<-sapply(1:nrow(avo_heat_melt), function(x) if(avo_heat_melt$value[x]<=0.001){"<=0.001"}else{
+    if(avo_heat_melt$value[x]<=0.01){"<=0.01"}else{
+      if(avo_heat_melt$value[x]<=0.05){"<=0.05"}else{">0.05"}}})
+  
+  heat<-ggplot(avo_heat_melt, aes(variable,meta, fill = Pvalue)) +
+    geom_tile(color = "black",size=0.5) +
+    theme_gray(8)+scale_fill_manual(values=c("#084594","#4292c6","#9ecae1","#deebf7"))+
+    theme(axis.text = element_text(size =10, color="black"),
+          axis.text.x = element_text(),
+          axis.title = element_text(size =15),
+          legend.text = element_text(size =14),
+          legend.title = element_text(size =12),
+          legend.position = c(1, 0), legend.justification = c(1,0),
+          plot.margin=unit(c(0,2.25,1,1),"cm"))+
+    xlab("Adjusted Principal Component")+ylab(NULL)
+  
+  grid.arrange(scree, heat, ncol=1, heights = c(2, 4))
+}
+```
+
+
+## Run PCA and apply the heat_scree plot function
+```{r warning=FALSE, fig.height=9, fig.width=11}
+## PCA
+PCA_full<-princomp(na.omit(PAWS_Beta))
+Loadings<-as.data.frame(unclass(PCA_full$loadings))
+vars <- PCA_full$sdev^2
+Importance<-vars/sum(vars)
+
+
+
+#Specify which covariates are categorical and/or categorical
+colnames(meta)
+meta$Sentrix_ID<-as.factor(meta$Sentrix_ID)
+meta$Genetic_cluster<-as.factor(meta$Genetic_cluster)
+meta$DECHIETH<-as.factor(meta$DECHIETH)
+meta$Age_Genetic_Collection<-as.factor(meta$Age_Genetic_Collection)
+meta$Gender_final<-as.factor(meta$Gender_final)
+
+meta_categorical<-meta[,c("Gender_final","Age_Genetic_Collection","DECHIETH","Genetic_cluster",
+                          "Fam_ID","zrank_ord",
+                          "Sample_Well","Sample_Plate","Sentrix_ID","Sentrix_Position","plate_row","dateGcollected")]
+meta_continuous<-meta[,c("BMI_Percentile","HGHEDLV2","DETOTIN2","COMPSES2","deinc2dep","FLadder","FADV_6")]
+c(colnames(meta_categorical),colnames(meta_continuous))
+ord <- c(1,2,3,4,5,6,12,13,14,15,16,17,18,19,7,8,9,10,11)
+
+
+#Apply function on PCA results, pulls in the meta data and beta values from above
+heat_scree_plot(Loadings, Importance)
+
+# COMBAT: Sentrix_ID, Sentrix_Position
+# LME covairates: Age_Genetic_colletion, Fam_ID, Genetic Cluster, 
+```
+
+
+
+
+## meta data correlation for covariate selection in lm
+```{r}
+meta_categorical<-meta[,c("Gender_final","Age_Genetic_Collection","DECHIETH","Genetic_cluster",
+                          "zrank_ord","minor_child",
+                          "Sample_Well","Sample_Plate","Sentrix_ID","Sentrix_Position","plate_row","dateGcollected")]
+meta_continuous<-meta[,c("BMI_Percentile","HGHEDLV2","DETOTIN2","COMPSES2","deinc2dep","FLadder","FADV_6")]
+
+
+meta_cor<-cbind(meta_categorical,meta_continuous)
+
+Meta_correlation<-lapply(1:ncol(meta_cor), function(x) as.numeric(meta_cor[,x]))
+Meta_correlation<-as.data.frame(do.call(cbind, Meta_correlation))
+colnames(Meta_correlation)<-colnames(meta_cor)
+
+correlation<-as.data.frame(cor(Meta_correlation, use="complete.obs", method="spearman") )
+
+# choose number of clusters
+wss <- (nrow((correlation))-1)*sum(apply((correlation),2,var))
+for (i in 2:10) wss[i] <- sum(kmeans((correlation), 
+                                     centers=i)$withinss)
+plot(1:10, wss, type="b", xlab="Number of Clusters",
+     ylab="Within groups sum of squares")
+
+k <- kmeans(correlation,10)
+
+# Append id and cluster
+correlationc <- cbind(correlation, id=seq(nrow(correlation)), cluster=k$cluster)
+correlationc$idsort <- correlationc$id[order(correlationc$cluster)]
+correlationc$idsort <- order(correlationc$idsort)
+correlationc$cluster <- NULL
+
+# use reshape2::melt to create data.frame in long format
+correlationc$id<-rownames(correlationc)
+correlationm <- melt(correlationc, id.vars=c("id","idsort"))
+library(scales)
+cols <- brewer_pal(pal = "RdBu")(5)
+
+ggplot(correlationm, aes(id, variable, fill = value)) +
+  geom_tile(color = "black",size=0.5) +
+  theme_gray(8)+theme(axis.text = element_text(size =10, color="black"),
+          axis.title =  element_blank(),
+          axis.text.x = element_text(angle = 90, hjust = 1, , vjust=0.5))+
+  scale_fill_gradientn(colours = cols, 
+                         values = rescale(c(-1, 0,1)),
+                         guide = "colorbar", limits=c(-1, 0.99))
+```
+
+
+# Confounding of minority status and genetic cluster for inclusion in models of vairables
+# should maybe be done after combat
+```{r}
+load("PAWS_Beta_norm_filtered.RData") #192 samples 428407    
+load("PAWS_meta_sentrix_genetic_clusters.RData")# with the 2015 data Nicki sent
+meta<-meta[which(meta$Meth_ID%in%colnames(PAWS_Beta)),]
+meta<-meta[match(colnames(PAWS_Beta), meta$Meth_ID),]
+
+# Minority status
+meta_minor<-meta[which(!(is.na(meta$minor_child))),]
+meta_minor$minor_child<-as.factor(meta_minor$minor_child)
+meta_minor_melt<-melt(meta_minor[,c("Meth_ID","minor_child","HGHEDLV2","COMPSES2","DETOTIN2",
+                                    "deinc2dep","FLadder","FADV_6","CF1rungE",
+                                    "CF1rungC","zrank_ord","SPNILadb")], id=c("Meth_ID","minor_child"))
+meta_minor_melt<-meta_minor_melt[which(meta_minor_melt$value<600),]
+
+ggplot(meta_minor_melt, aes(minor_child,value))+
+  geom_violin(aes(fill=minor_child))+
+  geom_boxplot(fill="grey",width=0.1, outlier.shape=19, outlier.size=1)+
+  facet_wrap(~variable, scales="free_y", ncol=5)+
+  theme_bw()+scale_fill_manual(values=c("#ef8a62","#67a9cf"), name="Minority Status")+
+  xlab("Child Ethnic Minority Status")
+    
+interest<-c("Meth_ID","minor_child","HGHEDLV2","COMPSES2","DETOTIN2",
+                                    "deinc2dep","FLadder","FADV_6","CF1rungE",
+                                    "CF1rungC","zrank_ord","SPNILadb") 
+pval<-data.frame(variable=interest[3:length(interest)],
+                 pval=sapply(3:length(interest),function(x){
+         round(t.test(meta_minor[which(meta_minor$minor_child==0),interest[x]],
+                meta_minor[which(meta_minor$minor_child==1),interest[x]])$p.value,4)}))
+
+
+
+#Genetic Cluster confounds
+meta_GC<-meta[which(!(is.na(meta$Genetic_cluster))),]
+meta_GC_melt<-melt(meta_GC[,c("Meth_ID","Genetic_cluster","HGHEDLV2","COMPSES2","DETOTIN2",
+                                    "deinc2dep","FLadder","FADV_6","CF1rungE",
+                                    "CF1rungC","zrank_ord","SPNILadb")], id=c("Meth_ID","Genetic_cluster"))
+col<-colorRampPalette(brewer.pal(11,"RdYlGn")[1:8])(4)
+meta_GC_melt<-meta_GC_melt[complete.cases(meta_GC_melt),]
+meta_GC_melt$Genetic_cluster<-as.factor(meta_GC_melt$Genetic_cluster)
+meta_GC_melt<-meta_GC_melt[which(meta_GC_melt$value<600),]
+
+ggplot(meta_GC_melt, aes(Genetic_cluster,value))+
+      geom_violin(aes(fill=Genetic_cluster))+
+      geom_boxplot(fill="grey",width=0.1, outlier.shape=19, outlier.size=1)+
+  facet_wrap(~variable, scales="free_y", ncol=5)+scale_fill_manual(values=col, name="Genetic Cluster")+
+      theme_bw()+
+      xlab("Genetic Cluster")
+interest<-c("Meth_ID","Genetic_cluster","HGHEDLV2","COMPSES2","DETOTIN2",
+                                    "deinc2dep","FLadder","FADV_6","CF1rungE",
+                                    "CF1rungC","zrank_ord","SPNILadb") 
+
+pval<-data.frame(variable=interest[3:length(interest)],
+                 pval=sapply(3:length(interest),function(x){
+         round(summary(aov(meta_GC[,interest[x]]~meta_GC[,"Genetic_cluster"]))[[1]][["Pr(>F)"]][1],4)}))
+
+
+
+## Age
+meta_age<-meta[which(!(is.na(meta$Age_Genetic_Collection))),]
+meta_age_melt<-melt(meta_GC[,c("Meth_ID","Age_Genetic_Collection","HGHEDLV2","COMPSES2","DETOTIN2",
+                                    "deinc2dep","FLadder","FADV_6","CF1rungE",
+                                    "CF1rungC","zrank_ord","SPNILadb")], id=c("Meth_ID","Age_Genetic_Collection"))
+meta_age_melt<-meta_age_melt[complete.cases(meta_age_melt),]
+meta_age_melt<-meta_age_melt[which(meta_age_melt$value<600),]
+meta_age_melt$Age_Genetic_Collection<-as.numeric(as.character(meta_age_melt$Age_Genetic_Collection))
+
+ggplot(meta_age_melt, aes(Age_Genetic_Collection,value))+
+  geom_point(color="grey",shape=19)+
+  facet_wrap(~variable, scales="free_y", ncol=5)+
+  theme_bw()+
+  xlab("Age Genetic Collection")+  stat_smooth(method="lm")
+
+interest<-c("Meth_ID","Age_Genetic_Collection","HGHEDLV2","COMPSES2","DETOTIN2",
+                                    "deinc2dep","FLadder","FADV_6","CF1rungE",
+                                    "CF1rungC","zrank_ord","SPNILadb") 
+
+pval_lm<-data.frame(variable=interest[c(5,7,9,12)],
+                 pval=sapply(c(5,7,9,12),function(x){
+         round(coef(summary(lm(meta_age[,interest[x]]~meta_age[,"Age_Genetic_Collection"])))[2,"Pr(>|t|)"],4)}))
+pval_aov<-data.frame(variable=interest[c(3,4,6,8,10,11)],
+                     pval=sapply(c(3,4,6,8,10,11),function(x){
+         round(summary(aov(meta_age[,interest[x]]~meta_age[,"Age_Genetic_Collection"]))[[1]][["Pr(>F)"]][1],4)}))
+
+
+
+## gender
+meta_gender<-meta[which(!(is.na(meta$Gender_final))),]
+meta_gender_melt<-melt(meta_GC[,c("Meth_ID","Gender_final","HGHEDLV2","COMPSES2","DETOTIN2",
+                                    "deinc2dep","FLadder","FADV_6","CF1rungE",
+                                    "CF1rungC","zrank_ord","SPNILadb")], id=c("Meth_ID","Gender_final"))
+meta_gender_melt<-meta_gender_melt[complete.cases(meta_gender_melt),]
+meta_gender_melt<-meta_gender_melt[which(meta_gender_melt$value<600),]
+meta_gender_melt$Gender_final<-as.factor(meta_gender_melt$Gender_final)
+
+ggplot(meta_gender_melt, aes(Gender_final,value))+
+      geom_violin(aes(fill=Gender_final))+
+      geom_boxplot(fill="grey",width=0.1, outlier.shape=19, outlier.size=1)+
+  facet_wrap(~variable, scales="free_y", ncol=5)+
+      theme_bw()+scale_fill_manual(values=c("#7fcdbb","#9970ab"), name="Gender")+
+      xlab("Gender")
+
+interest<-c("Meth_ID","Gender_final","HGHEDLV2","COMPSES2","DETOTIN2",
+                                    "deinc2dep","FLadder","FADV_6","CF1rungE",
+                                    "CF1rungC","zrank_ord","SPNILadb") 
+
+pval<-data.frame(variable=interest[3:length(interest)],
+                 pval=sapply(3:length(interest),function(x){
+         round(t.test(meta_gender[which(meta_gender$Gender_final==0),interest[x]],
+                meta_gender[which(meta_gender$Gender_final==1),interest[x]])$p.value,4)}))
+
+```
+
+
+
+
+
+#Combat
+```{r}
+library(sva)
+library(pamr)
+library(limma)
+
+
+# COMBAT: Sentrix_ID, plate_row, Sentrix_Position (cant correct dateGcollected, many with just one per date)
+# LME covairates: Age_Genetic_colletion, Fam_ID, Genetic Cluster
+# Protect: HGHEDLV2+DETOTIN2+COMPSES2+deinc2dep+FLadder+FADV_6+zrank_ord
+
+# EL_CG data
+pheno = meta
+pheno$Sentrix_ID<-as.factor(pheno$Sentrix_ID)
+
+Mval<-function(beta) log2(beta/(1-beta))
+edata = apply(PAWS_Beta, 1, Mval) # need mvalues for combat
+edata = as.data.frame(edata)
+edata = t(edata)
+
+#Combat
+#Combat can't deal with NAs in meta data Impute pheno
+f=function(x){
+   x<-as.numeric(as.character(x)) #first convert each column into numeric if it is from factor
+   x[is.na(x)] =median(x, na.rm=TRUE) #convert the item with NA to median value from the column
+   x #display the column
+}
+pheno$HGHEDLV2<-f(pheno$HGHEDLV2)
+pheno$COMPSES2<-f(pheno$COMPSES2)
+pheno$deinc2dep<-f(pheno$deinc2dep)
+pheno$FLadder<-f(pheno$FLadder)
+pheno$FADV_6<-f(pheno$FADV_6)
+pheno$zrank_ord<-f(pheno$zrank_ord)
+pheno$DETOTIN2<-f(pheno$DETOTIN2)
+
+#this model matrix does work                      nCovs=(3,4,5,6)
+mod = model.matrix(~as.factor(HGHEDLV2)+DETOTIN2+COMPSES2+deinc2dep+FLadder+FADV_6+zrank_ord, data=pheno) 
+numCovs<-c(7,8,9,10,11,12)
+
+## filter out CpGs which have NAs batched by sentrix Id
+sentrix_na<-sapply(1:nrow(edata), function(cpg) max(tapply(edata[cpg,], pheno$Sentrix_ID, function(x) sum(is.na(x)))))
+edata_filtered<-edata[which(sentrix_na<3),]# 426893 (1514 CpGs had to be removed because NAs batched by sentrix ID)
+
+#Sentrix_ID
+batch = pheno$Sentrix_ID
+combat_PAWS_Beta = ComBat(dat=edata_filtered, batch=batch, mod=mod, numCovs=numCovs, par.prior=TRUE)
+
+
+
+#plate_row only need if SENtrix ID doesnt correct it too
+batch = pheno$Sentrix_Position
+combat_PAWS_Beta = ComBat(dat=combat_PAWS_Beta, batch=batch, mod=mod, numCovs=numCovs, par.prior=TRUE)
+combat_PAWS_Mval<-combat_PAWS_Beta
+
+#Back to betas
+betas<-function(M) 2^M/((2^M)+1)
+combat_PAWS_Beta = apply(combat_PAWS_Beta, 1, betas) # need mvalues for combat
+combat_PAWS_Beta = as.data.frame(combat_PAWS_Beta)
+combat_PAWS_Beta = t(combat_PAWS_Beta)
+combat_PAWS_Beta<-combat_PAWS_Beta
+
+save(combat_PAWS_Beta, combat_PAWS_Mval, file="PAWS_Combatted.RData")
+```
+
+
+
+
+
+# Compare Pre and post normalization and combat REPLICATES
+```{r}
+load("PAWS_Combatted.RData") # Includes replicates
+load("PAWS_methlylumi.RData")
+load("PAWS_sampFiltered_prbFilter_BMIQ.RData")
+
+beta_raw<-betas(PAWS.2)
+rename<-c("3","3F","34","32F","32")
+colnames(beta_raw)[which(colnames(beta_raw)%in%rename)]<-c("26Fn","34Fn","3n","34n","26n")
+beta_bmiq<-betas(PAWS)
+beta_Combat<-combat_PAWS_Beta
+
+Replicates<-c("33F","33","180F","180","186F","186","26Fn","26n","34Fn","34n","10F","10","104M","104","116M","116","117F","117rF","121F","121","72F","72","78rF","78F","20rM","20r2M","20M")# 13 replicated samples one sample has 3 replicates total (20M)
+
+original_rep<-beta_raw[,which(colnames(beta_raw)%in%Replicates)]
+bmiq_rep<-beta_bmiq[,which(colnames(beta_bmiq)%in%Replicates)]
+combat_rep<-beta_Combat[,which(colnames(beta_Combat)%in%Replicates)]
+
+
+
+replicated_individuals<-c("33","180","186","26","34","10","104", "116","117","121","72","78","20")
+
+
+###Root mean squared error
+library(hydroGOF)
+Data_rmse<-function(df){
+  rep_cor<-do.call(rbind,lapply(1:12, function(x) {cols<-grep(replicated_individuals[x], colnames(df))
+                                                   data.frame(Comparison=replicated_individuals[x],
+                                                              Correlation=rmse(df[,cols[1]],
+                                                                              df[,cols[2]],use="complete.obs"))}))
+  rep_cor_20<- data.frame(Comparison=replicated_individuals[13],
+                          Correlation=c(rmse(df[,5],df[,10]),
+                                        rmse(df[,5],df[,17]),
+                                        rmse(df[,10],df[,17])))
+  rep_cor<-rbind(rep_cor, rep_cor_20)}
+
+original_rep_cor<-Data_rmse(original_rep)
+bmiq_rep_cor<-Data_rmse(bmiq_rep)
+combat_rep_cor<-Data_rmse(combat_rep)
+
+original_rep_cor$Data<-"Original"
+bmiq_rep_cor$Data<-"BMIQ Norm"
+combat_rep_cor$Data<-"BMIQ Norm Combat"
+
+
+rep_cor<-rbind(original_rep_cor,bmiq_rep_cor,combat_rep_cor)
+rep_cor$Data <- factor(rep_cor$Data, levels=c("Original","BMIQ Norm", "BMIQ Norm Combat"))
+rep_cor$Comparison<-as.character(rep_cor$Comparison)
+rep_cor$Comparison[43:45]<-c("20","20_1","20_2")
+rep_cor$Comparison[28:30]<-c("20","20_1","20_2")
+rep_cor$Comparison[13:15]<-c("20","20_1","20_2")
+
+save(rep_cor, file="replicate_RMSE.RData")
+
+
+ggplot(rep_cor, aes(Data, Correlation, group=Comparison, color=Comparison))+geom_line(size=2)+theme_bw()+ylab("Replicate Root Mean Squared Error in Beta Value")
+
+
+Replicates<-c("33F","180F","186F","26Fn","34Fn","10F","104M", "116M","117F","121F","72F","78rF","20rM","20r2M")# use later will mean 176 unique samples
+combat_PAWS_Beta_norep<-combat_PAWS_Beta[,which(!(colnames(combat_PAWS_Beta)%in%Replicates))]#426893    178
+PAWS_Beta<-combat_PAWS_Beta_norep
+save(PAWS_Beta, file="combat_PAWS_Beta_norep.RData")
+```
+
+
+
+# PCA after COMBAT
+```{r}
+## load EL_CG data, meta and Hannum
+load("combat_PAWS_Beta_norep.RData")
+load("PAWS_meta_sentrix_genetic_clusters.RData")
+
+meta<-meta[which(meta$Meth_ID%in%colnames(PAWS_Beta)),]
+meta<-meta[match(colnames(PAWS_Beta), meta$Meth_ID),]
+
+PCA_full_combat<-princomp(na.omit(PAWS_Beta))
+Loadings_combat<-as.data.frame(unclass(PCA_full_combat$loadings))
+vars_combat <- PCA_full_combat$sdev^2
+Importance_combat<-vars_combat/sum(vars_combat)
+
+meta$Sentrix_ID<-as.factor(meta$Sentrix_ID)
+meta$Genetic_cluster<-as.factor(meta$Genetic_cluster)
+meta$DECHIETH<-as.factor(meta$DECHIETH)
+meta$Age_Genetic_Collection<-as.factor(meta$Age_Genetic_Collection)
+meta$Gender_final<-as.factor(meta$Gender_final)
+
+meta_categorical<-meta[,c("Gender_final","Age_Genetic_Collection","DECHIETH","Genetic_cluster",
+                          "Fam_ID","zrank_ord",
+                          "Sample_Well","Sample_Plate","Sentrix_ID","Sentrix_Position","plate_row","dateGcollected")]
+meta_continuous<-meta[,c("BMI_Percentile","HGHEDLV2","DETOTIN2","COMPSES2","deinc2dep","FLadder","FADV_6")]
+c(colnames(meta_categorical),colnames(meta_continuous))
+ord <- c(1,2,3,4,5,6,12,13,14,15,16,17,18,19,7,8,9,10,11)
+
+heat_scree_plot(Loadings_combat, Importance_combat)
+```
+

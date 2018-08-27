@@ -1,0 +1,90 @@
+Loading public data
+========================================================
+
+Libraries
+```{r}
+setwd("/big_data/redgar/PAWS/PAWS_final")
+library(GEOquery)
+```
+
+
+
+
+Download GEO meta data
+```{r}
+library(GEOmetadb)
+getSQLiteFile()
+con <- dbConnect(SQLite(), "GEOmetadb.sqlite")
+dbListFields(con, "gsm")
+  
+x<-dbGetQuery(con, "select title,series_id,description,gsm,source_name_ch1,characteristics_ch1 from gsm where gpl='GPL13534'")
+
+meta<-x
+#Samples with age
+age<-sapply(1:nrow(meta), function(x) if(length(grep("Age|age", meta$characteristics_ch1[x]))==1){x}else{})#those with age
+meta_age<-meta[as.numeric(unlist(age)),]
+meta_age$age<-sapply(1:nrow(meta_age), function(x){
+  BC<-strsplit(meta_age$characteristics_ch1[x], ";\t")[[1]] # divide the sample meta data 
+  if(length(grep("age|Age",BC))==0){NA}else{ #if the field is present
+    gsub("age:","",BC[grep("age",BC)], fixed=T)}}) # then pull the value
+meta_age$age_fix<-sapply(1:nrow(meta_age), function(x) gsub("years","", meta_age$age[x]))
+meta_age$age_fix<-sapply(1:nrow(meta_age), function(x) gsub("years","", meta_age$age_fix[x]))
+meta_age$age_fix<-as.numeric(meta_age$age_fix)
+meta_age<-meta_age[which(!(is.na(meta_age$age_fix))),]
+#samples with blood
+whole_blood<-sapply(1:nrow(meta_age), function(x) if(length(grep("Whole blood|whole blood|Whole Blood", meta_age$characteristics_ch1[x]))==1){x}else{})
+meta_age_blood<-meta_age[as.numeric(unlist(whole_blood)),]
+meta_age_blood$tissue<-as.factor(meta_age_blood$characteristics_ch1)
+levels(meta_age_blood$tissue)[grep("Whole blood|whole blood|Whole Blood", levels(meta_age_blood$tissue))]<-"Blood"
+tail(meta_age_blood)
+
+
+
+meta_age_blood$description<-NULL
+meta_age_blood$age<-NULL
+meta_age_blood$source_name_ch1<-NULL
+meta_age_blood$characteristics_ch1<-NULL
+meta_age_blood$title<-NULL
+save(meta_age_blood, file="GEO_blood_age_samples.RData")
+
+PAWS_match<-meta_age_blood[which(meta_age_blood$age_fix<=25),] # 2 studies aged 18-25 43 samples (39 unique, some with schz)
+```
+
+# get data
+```{r}
+GSE<-c('GSE41169','GSE52114')# option to work simulteneously with multiple series
+GEO<-lapply(GSE, function(x) as.data.frame(exprs(getGEO(x)[[1]])))
+names(GEO)<-GSE
+
+```
+
+# GEO aged and blood matched
+```{r}
+GEO_filtered<-lapply(1:length(GEO), function(x) GEO[[x]][,which(colnames(GEO[[x]])%in%PAWS_match$gsm)])
+twin_remove<-c("GSM1259875","GSM1259877","GSM1259879","GSM1259881","GSM1259883","GSM1259885","GSM1259887","GSM1259889","GSM1259891")
+GEO_filtered[[2]]<-GEO_filtered[[2]][,which(!(colnames(GEO_filtered[[2]])%in%twin_remove))]#37 samples total
+PAWS_match_filtered<-PAWS_match[which(PAWS_match$gsm%in%c(colnames(GEO[[1]]), colnames(GEO[[2]]))),]
+GEO_filtered[[1]]<-GEO_filtered[[1]][which(rownames(GEO[[1]])%in%rownames(GEO[[2]])),]
+GEO_betas<-do.call(cbind, GEO_filtered)
+
+PAWS_GEO_meta<-PAWS_match_filtered[match(colnames(GEO_betas), PAWS_match_filtered$gsm),]
+save(PAWS_GEO_meta,GEO_betas, file="GEO_PAWS_aged_matched_whole_blood.RData")
+```
+
+### DOwnload t cell data
+Study of 12 Tcells from McGill run on 450K (same method as Szyf paper)
+```{r}
+GSE<-c('GSE53191')# option to work simulteneously with multiple series
+GEO<-lapply(GSE, function(x) as.data.frame(exprs(getGEO(x)[[1]])))
+names(GEO)<-GSE
+save(GEO, file="GSE53191.RData")
+```
+
+
+Study of 32 Tcells 
+```{r}
+GSE<-c('GSE50222')# option to work simulteneously with multiple series
+GEO<-lapply(GSE, function(x) as.data.frame(exprs(getGEO(x)[[1]])))
+names(GEO)<-GSE
+save(GEO, file="GSE50222.RData")
+```

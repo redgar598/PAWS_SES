@@ -1,0 +1,286 @@
+---
+title: "PAWS Methylation"
+author: "redgar"
+date: '2015-01-26'
+output: html_document
+---
+
+Normalization of the PAWS methylation samples. 
+========================================================
+
+## Libraries
+```{r}
+library(methylumi,wateRmelon, quietly = TRUE)
+library(lumi)
+library(ggplot2)
+library(RColorBrewer)
+library(reshape)
+library(IlluminaHumanMethylation450k.db)
+
+
+setwd("/big_data/redgar/PAWS/PAWS_final")
+```
+
+
+## make the methlumi objects from the genome studio exports
+```{r}
+# Load the genome studio files Mina Made
+allFile <- ("PAWS.all-alldata.txt") 
+qcFile <- ("PAWS.all-avgbeta.txt")
+betaFile <- ("PAWS.all-qcfile.txt") 
+
+PAWS<- lumiMethyR(allFile)
+PAWS.2 <- methylumiR(allFile, qcfile = allFile)
+save(PAWS,PAWS.2, file="PAWS_methlylumi.RData")
+```
+
+
+The function *lumiMethyR()* coerces the object (**allFile**) into a **MethyLumiM class object**, which contains those four elements (exprs, methylated, unmethylated, and detection p value).
+
+The function *methylumiR()* coerces the object (**betaFile**) into a **MethyLumiSet class object**, which holds the intensities and the beta values.  This is also where the sample information (the sampleFile) can be added as phenoData.
+
+
+#### Pvalues of samples on each array
+```{r}
+load("PAWS_methlylumi.RData")
+## meta data shared by Nicki
+meta<-read.csv("PAWS-GdatasetforKoborlabJuly2014-ID_ordered.csv")
+## sample sheet for the sentirx ID etc
+sample_info<-read.csv("PAWS.all-samplefile.txt",sep="\t")
+
+#p-values for detection for the samples
+avgPval <- colMeans(pvals(PAWS))
+sample_info$Det_pval<-avgPval
+ggplot(sample_info)+geom_boxplot(aes(as.factor(Sentrix_ID), Det_pval, fill=as.factor(Sentrix_ID), outlier.shape = NA))+
+  geom_point(aes(as.factor(Sentrix_ID), Det_pval, group=Sample_Label), shape=19, color="grey70",
+             position = position_jitter(w = 0.25))+theme_bw()+theme(axis.text.x = element_text(angle = 90, hjust = 1))+guides(fill=F)+xlab("Array ID")+ylab("Sample Detection P Value")
+
+## group of samples have very high detection pvalues all on one sentrix ID
+# Sentrix_ID 5998789016
+subset(sample_info, Sentrix_ID=="5998789016")
+bad_samples<-as.character(sample_info$Sample_Label[which(sample_info$Det_pval>0.001)])
+```
+
+
+
+## Sample Mixups compare to SNP Data (so complicated, omg)
+## here I am taking the 15 SNPs on both the 450K and the psych chip and correlating the measures between all samples
+## ideally the sample on 450K and Psychchip with the highest correlation at these 15 SNPs should have matching sample ids
+```{r}
+#load PsychChip
+load("PAWS_snps_Ballelefreq.RData")
+#Load Betas from 450K
+load("PAWS_methlylumi.RData")
+PAWS_Betas<-betas(PAWS)
+
+# which SNPs are on both
+Matched_snps<-intersect(rownames(PAWS_Betas), PAWS_snps_casted$SNP_Name)# only 15 names in common. Not suprising as there are only 65 SNPS on the 450K
+
+# Pull the calls of the 15 on the psychchip
+PAWS_snps_Ballelefreq_450K<-PAWS_snps_casted[which(PAWS_snps_casted$SNP_Name%in%Matched_snps),]
+PAWS_snps_Ballelefreq_450K$SNP_Name<-as.character(PAWS_snps_Ballelefreq_450K$SNP_Name)
+PAWS_snps_Ballelefreq_450K_melt<-melt(PAWS_snps_Ballelefreq_450K, id="SNP_Name")
+# Pull the calls of the 15 on the 450K
+PAWS_Betas_onpsych<-as.data.frame(PAWS_Betas[which(rownames(PAWS_Betas)%in%PAWS_snps_casted$SNP_Name),])
+PAWS_snps_on450K<-as.data.frame(PAWS_snps_casted[which(PAWS_snps_casted$SNP_Name%in%rownames(PAWS_Betas)),])
+# rows are in same order (snps in same order)
+rownames(PAWS_snps_on450K)<-PAWS_snps_on450K$SNP_Name
+PAWS_snps_on450K$SNP_Name<-NULL
+
+save(PAWS_Betas_onpsych,PAWS_snps_on450K, file="Psychip_450K_overlapin_Paws.RData")
+
+
+#fix the addtional terms in the 450K sample names
+col_order<-sapply(1:ncol(PAWS_Betas_onpsych), function(x) gsub(c("F|M|_R1|_R2|r2|r"), "", colnames(PAWS_Betas_onpsych)[x][[1]]))
+
+PAWS_Betas_onpsych_round<-apply(PAWS_Betas_onpsych, 2, function(x) round(x/.5)*.5)
+PAWS_snps_on450K_round<-apply(PAWS_snps_on450K, 2,  function(x) round(x/.5)*.5)
+
+## 3 SNPs seems to be differently coded on the psychip and the 450K (ie 0=1, 1=0)
+matched<-which(col_order%in%colnames(PAWS_snps_on450K))
+check<-lapply(matched, function(x) {df<-data.frame(meth=PAWS_Betas_onpsych_round[,x],
+                                                   psy=PAWS_snps_on450K_round[,which(colnames(PAWS_snps_on450K)==col_order[x])])
+                                    unlist(sapply(1:15, function(y) if(df[y,1]==df[y,2]){}else{y}))})
+# four SNPS have more that 50 samples with mis matches indicating they are liekly encoded oppositely as the other SNPs hav ~15 mismatches (true sample mislabel)
+table(unlist(check)) # "rs1040870"  "rs10774834" "rs715359"   "rs951295"  encoded differently
+rownames(PAWS_Betas_onpsych_round)[which(table(unlist(check))>50)]
+## ie A=B 
+
+
+# will recode the psychip data to match the 450K encoding
+recode_num<-function(x) 1-x
+recoded_psychip_num<-(apply(PAWS_snps_on450K[c(1,3,13,15),], c(1,2), recode_num))
+PAWS_snps_on450K_recoded_num<-rbind(PAWS_snps_on450K[c(2,4:12,14),], recoded_psychip_num)
+PAWS_snps_on450K_recoded_num<-PAWS_snps_on450K_recoded_num[match(rownames(PAWS_Betas_onpsych),rownames(PAWS_snps_on450K_recoded_num)),]
+
+# correlate the measures at the 15 SNPs and see which samples are likely matches
+sample_correlations<-as.data.frame(do.call(rbind,lapply(1:ncol(PAWS_snps_on450K_recoded_num), function(x) {
+  sapply(1:ncol(PAWS_Betas_onpsych), function(y) cor(PAWS_snps_on450K_recoded_num[,x], PAWS_Betas_onpsych[,y],use="complete.obs"))})))
+
+rownames(sample_correlations)<-colnames(PAWS_snps_on450K_recoded_num)
+colnames(sample_correlations)<-colnames(PAWS_Betas_onpsych)
+
+## summaries matches (pull out the max match)
+PsychChip_ID<-sapply(1:ncol(sample_correlations), function(x) rownames(sample_correlations)[which(sample_correlations[,x]==max(sample_correlations[,x]))])
+
+
+df<-data.frame(PsychChip_ID=unlist(PsychChip_ID),
+               Meth_ID=colnames(sample_correlations),
+               Correlation=sapply(c(1:ncol(sample_correlations)), function(x) max(sample_correlations[,x])),
+               sec_id=col_order)
+
+write.csv(df, file="PsychChip_450K_Matching.csv")
+```
+# I found the mixups by looking for the best correlation between samples. If there was a mix up I would try to find the best match and see if it could some how be resolved (ig slight differences in sample naming)
+
+
+
+## Sample Removal and Name changes
+```{r}
+Bad_Meth_IDs<-c("100M","40F","109M","120M","95F","92M","134F","136M","50F","167M","26M","31F","27M","27","41_R1","41_R2","34F","60F")
+
+Replicates<-c("33F","180F","186F","26Fn","34Fn","10F","104M", "116M","117F","121F","72F","78rF","20rM","20r2M")# use later will mean 178 unique samples
+rename<-c("3","3F","34","32F","32")
+
+
+#Filter Bad meth samples (has no pair on the psychchip)
+PAWS_Betas_sample_filtered<-PAWS_Betas[,which(!(colnames(PAWS_Betas)%in%Bad_Meth_IDs))] #485577    192 (14 replicates)
+#Rename
+colnames(PAWS_Betas_sample_filtered)[which(colnames(PAWS_Betas_sample_filtered)%in%rename)]
+colnames(PAWS_Betas_sample_filtered)[which(colnames(PAWS_Betas_sample_filtered)%in%rename)]<-c("26Fn","34Fn","3n","34n","26n")
+
+save(PAWS_Betas_sample_filtered, file="PAWS_Betas_sample_filtered.RData")
+
+#Filter Psychchip
+meth_psych_format<-sapply(1:ncol(PAWS_Betas_sample_filtered), function(x) gsub(c("F|M|_R1|_R2|r2|r|Fn|n"), "", colnames(PAWS_Betas_sample_filtered)[x][[1]]))
+
+
+colnames(PAWS_snps_Ballelefreq_450K)[which(colnames(PAWS_snps_Ballelefreq_450K)=="10_9630002082_R10C02")]<-"186"
+colnames(PAWS_snps_Ballelefreq_450K)[which(colnames(PAWS_snps_Ballelefreq_450K)=="10_9630002082_R08C02")]<-"10"
+#rownames(PAWS_snps_Ballelefreq_450K_melt)<-PAWS_snps_Ballelefreq_450K_melt$SNP_Name
+#PAWS_snps_Ballelefreq_450K_melt$SNP_Name<-NULL
+
+colnames(PAWS_snps_Ballelefreq_450K)[which(!(colnames(PAWS_snps_Ballelefreq_450K)%in%meth_psych_format))]
+colnames(PAWS_Betas_sample_filtered)[which(!(meth_psych_format%in%colnames(PAWS_snps_Ballelefreq_450K)))]# 60F does not have a PsychChip
+PAWS_psychchip_filtered<-colnames(PAWS_snps_Ballelefreq_450K)[which((colnames(PAWS_snps_Ballelefreq_450K)%in%meth_psych_format))]# 178 because 60F does not have a PsychChip
+
+meta<-read.csv("PAWS-GdatasetforKoborlabJuly2014-ID_ordered.csv")
+meta_filtered<-meta[which(meta$PAWSG_ID%in%PAWS_psychchip_filtered),]
+#Duplicate rows for replicates
+meth_samples<-data.frame(Meth_ID=colnames(PAWS_Betas_sample_filtered), Psy_ID=meth_psych_format)
+meta_w_reps<-merge(meth_samples, meta_filtered, by.x="Psy_ID", by.y="PAWSG_ID")
+meta<-meta_w_reps
+
+write.csv(meta, file="PAWS_sample_info_with_replicates.csv")#might not be up to date
+```
+
+
+
+#load methylumi and filter bad samples before normalization
+```{r}
+load("PAWS_methlylumi.RData")
+
+Bad_Meth_IDs<-c("100M","40F","109M","120M","95F","92M","134F","136M","50F","167M","26M","31F","27M","27","41_R1","41_R2","34F","60F")
+
+Replicates<-c("33F","180F","186F","26Fn","34Fn","10F","104M", "116M","117F","121F","72F","78rF","20rM","20r2M")# use later will mean 176 unique samples
+rename<-c("3","3F","34","32F","32")
+
+#filter bad
+PAWS.2 <- PAWS.2[,!sampleNames(PAWS.2)%in%Bad_Meth_IDs]#485577 192
+#Rename
+sampleNames(PAWS.2)[which(sampleNames(PAWS.2)%in%rename)]
+sampleNames(PAWS.2)[which(sampleNames(PAWS.2)%in%rename)]<-c("26Fn","34Fn","3n","34n","26n")
+```
+
+
+
+
+# Normalization
+```{r}
+PAWS<-PAWS.2
+dim(PAWS) # 485577      192 
+```
+
+
+
+### Probe Filtering, Courtesy of yours truly, Sumaiya Islam 
+
+## here I did not remove the CpGs with SNPs in the probes. And that was silly. I do it later.
+
+##### Removal of SNP Probes
+We remove the SNP probes as they are used as an internal control to ensure your samples are what you think they are and are not used for any methylation analysis.
+
+```{r HTT_Leavitt_SNPprobes, echo=FALSE}
+PAWS <- PAWS[substring(featureNames(PAWS),1,2) != "rs", ]
+dim(PAWS) # probes = 485512, n = 192
+```
+
+##### Removal of XY Probes
+                
+We remove probes located on the X and Y chromosome in this analysis because unlike autosomes, sex chromosomes are not in equal number between females (XX) and males (XY) and if your cohort is not sex matched you will have a disproportionate number of X vs Y chromosomes present in your analysis throwing off the data of those probes.
+                                
+```{r HTT_Leavitt_XYprobes, echo=FALSE}
+PAWS <- PAWS[!fData(PAWS)$CHR%in%c("X", "Y"), ]
+dim(PAWS) # probes = 473864, n = 192
+```
+
+##### Cross-hybridizing probes
+
+Some probes have been found to cross-hybridize with other chromosomes (Price et al. 2013 *Epigenetics*).  It is at the discretion of the user whether or not they want to remove these cross-hybridizing probes, since it isn't a guarantee that they will cross-hybridize every time the experiment is run.  Probes that cross-hybridize to the sex chromosomes are typically removed, as they run a higher risk of confounding the data than probes that cross-hybridize to autosomal chromosomes.  
+
+We remove probes which bind multiple locations in the genome as long as one of the locations is on the XY chromosome. The reason for this is as the X and Y chromosomes are not balanced amongst our samples (males vs females) we have to remove all probes which bind them so as to not skew the normalization. We do not remove multiple binders of probes which bind at various sites only in the autosomal chromosomal regions because they will most likely not skew our normalization and when we obtain our "hit list" we will verify them using pyrosequencing in order to determine if the specific site of interest is providing the signal we are seeing.
+
+```{r}
+xy_hit_index <- which(fData(PAWS)$XY_Hits == "XY_NO")
+(n.XYcrosshybrid.probes<-(length(featureNames(PAWS))-length(xy_hit_index)))
+PAWS <- PAWS[xy_hit_index, ] 
+dim(PAWS) # probes = 462452, n = 192
+
+auto_hit_index <- which(fData(PAWS)$Autosomal_Hits== "A_NO")
+(n.autocrosshybrid.probes<-(length(featureNames(PAWS))-length(auto_hit_index)))
+PAWS <- PAWS[auto_hit_index, ] 
+dim(PAWS) # probes = 433274, n = 192
+```
+
+We have removed 52303 probes. This leaves us with 433274 probes for our analysis.
+
+
+# Watermelon Filter and Normalization
+# BMIQ (probe type normalization)
+    #Checks
+      #iDMR, X, Snps
+      #Replicates correlation
+      
+```{r}
+# waterMelon Bad probe filtration
+library(wateRmelon)
+PAWS.pf<-pfilter(PAWS)
+
+    #0 samples having 1 % of sites with a detection p-value greater than 0.05 were removed 
+    #Samples removed:  
+    #2972 sites were removed as beadcount <3 in 5 % of samples 
+    #2433 sites having 1 % of samples with a detection p-value greater than 0.05 were removed 
+dim(PAWS.pf) #  428407       9=192 
+
+PAWS<-PAWS.pf
+save(PAWS, file = "PAWS_fully_filtered.RData")
+```
+We have removed 57170 probes. This leaves us with 428407 probes for our analysis.
+
+
+
+
+
+#BMIQ Normalization
+```{r}
+library(RPMM)
+bmiq_PAWS<-BMIQ(PAWS)
+PAWS<-bmiq_PAWS
+dim(PAWS) # 428407      192 
+
+PAWS_Beta<-betas(PAWS)
+PAWS_Beta<-as.data.frame(PAWS_Beta)#428407    192
+
+save(PAWS_Beta, file="PAWS_Beta_norm_filtered.RData")
+```
+

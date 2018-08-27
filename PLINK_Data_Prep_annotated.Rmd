@@ -1,0 +1,86 @@
+PLINK Data Prep 
+========================================================
+
+This code preps data (post quality control from the SNP_final_report_Loading_annotated.rmd script) for IBS clustering in PLINK. THIS CODE TAKES MUCH TIME.
+
+```{r}
+library(reshape2)
+setwd("/big_data/redgar/PAWS/PAWS_final")
+load("PAWS_snps_filtered.RData")
+```
+
+# MAP File, there are many online resources for how these files are shaped and what values need to be in them.
+```{r}
+#only going to do a 3 column map file so need to specify plink --file mydata --map3
+PAWS_snps_filtered_map<-PAWS_snps_filtered[,c(1,5,6)]
+PAWS_snps_filtered_map_unique<-unique(PAWS_snps_filtered_map) # 536303 SNPs
+PAWS_snps_filtered_map_unique$cM<-0
+PAWS_snps_filtered_map_unique<-PAWS_snps_filtered_map_unique[,c(3,1,4,2)]
+PAWS_snps_filtered_map_unique<-PAWS_snps_filtered_map_unique[with(PAWS_snps_filtered_map_unique, order(Position)),]
+write.table(as.matrix(PAWS_snps_filtered_map_unique), "PAWS_snps_filtered_MAP.txt", sep="\t", row.names = F,col.names = F,quote=FALSE)
+```
+
+
+
+
+# Parse PED for PLINK
+```{r}
+PAWS_snps_filtered<-PAWS_snps_filtered[with(PAWS_snps_filtered, order(Sample_ID, Position)),]
+PAWS_snps_filtered_ped<-PAWS_snps_filtered[,c(1,2,7,8)]
+#blanks from genome studio need to be 0 for PLINK
+#replace - with 0
+PAWS_snps_filtered_ped$Allele1<-as.character(PAWS_snps_filtered_ped$Allele1)
+PAWS_snps_filtered_ped$Allele1[which(PAWS_snps_filtered_ped$Allele1=="-")]<-0
+PAWS_snps_filtered_ped$Allele2<-as.character(PAWS_snps_filtered_ped$Allele2)
+PAWS_snps_filtered_ped$Allele2[which(PAWS_snps_filtered_ped$Allele2=="-")]<-0
+
+#shape them datas to PED
+PAWS_snps_filtered_ped_melt <- melt(PAWS_snps_filtered_ped, id.vars = c("SNP_Name","Sample_ID"))
+PAWS_snps_filtered_ped_melt_dcast<-dcast(PAWS_snps_filtered_ped_melt,  Sample_ID~SNP_Name + variable)
+
+#maintain order of SNPS and samples (PLINK likes the ordered a certain way)
+PAWS_snps_filtered_ped_melt_dcast<-dcast(PAWS_snps_filtered_ped_melt,  
+                                         Sample_ID~factor(SNP_Name,levels=PAWS_snps_filtered_ped_melt$SNP_Name[1:nrow(PAWS_snps_filtered_ped_melt)]) + variable)
+
+
+
+#Sex meta
+meta<-read.csv("PAWS-GdatasetforKoborlabJuly2014-ID_ordered.csv")
+
+# add replicate to meta data
+meta_10rep<-subset(meta, PAWSG_ID=="10")
+meta_10rep$PAWSG_ID<-"10_9630002082_R08C02"
+meta$PAWSG_ID[which(meta$PAWSG_ID=="10")]<-"10_9630002082_R10C02"
+meta<-rbind(meta, meta_10rep)
+# 193 is not in meta data, can identify from genotyping later
+meta_193<-subset(meta, PAWSG_ID=="192")
+meta_193[1,]<-NA
+meta_193$PAWSG_ID<-"193"
+meta_193$Gender_final<-193
+meta<-rbind(meta, meta_193)
+meta_ordered<-meta[which(meta$PAWSG_ID%in%PAWS_snps_filtered_ped_melt_dcast$Sample_ID),]
+meta_ordered<-meta_ordered[match(PAWS_snps_filtered_ped_melt_dcast$Sample_ID, meta_ordered$PAWSG_ID),]
+
+
+
+#Family ID, Paternal and Maternal ID are inportatn for PLINK but not relevant for PAWS
+PAWS_snps_filtered_ped_melt_dcast$Fam_ID<-"0"
+PAWS_snps_filtered_ped_melt_dcast$Pat_ID<-"0"
+PAWS_snps_filtered_ped_melt_dcast$Mat_ID<-"0"
+
+# Add gender
+Gender<-sapply(1:nrow(meta_ordered), function(x) if(meta_ordered$Gender_final[x]==0){1}else{if(meta_ordered$Gender_final[x]==1){2}else{0}})
+PAWS_snps_filtered_ped_melt_dcast$Sex<-as.character(Gender)
+
+# Add disease status (PAWS can test if is is equally distributed between ethnicities called). Not relevant for PAWS
+PAWS_snps_filtered_ped_melt_dcast$Affection<-"0"
+
+# Change column names
+PAWS_snps_filtered_ped_melt_dcast<-PAWS_snps_filtered_ped_melt_dcast[,c("Fam_ID","Sample_ID","Pat_ID","Mat_ID","Sex","Affection", 
+                                                                        colnames(PAWS_snps_filtered_ped_melt_dcast)[2:(ncol(PAWS_snps_filtered_ped_melt_dcast)-5)])]
+
+## Save the PED file
+write.table(as.matrix(PAWS_snps_filtered_ped_melt_dcast), "PAWS_snps_filtered_ped.txt", sep="\t", row.names = F,col.names = F,quote=FALSE)
+```
+
+

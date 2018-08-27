@@ -1,0 +1,180 @@
+Loading the SNP calls from the PsychChip
+========================================================
+
+This script:
+*Pulls the files from genome studio
+*Runs quality control to remove bad samples
+*Runs quality controls to remove bad probes
+*Does and initial PCA to pull out gneetic clusters (but PLINK is the more comprehensive method)
+*Builds ped and map files for PLINK analysis 
+
+
+### Set working directory and load libraries
+```{r}
+setwd("/big_data/redgar/PAWS/PAWS_final")
+library(ggplot2)
+library(reshape)
+library(grid)
+library(gridExtra)
+```
+
+# Quality Control
+### Remove Bad Samples
+This code first loads the DNA table to look at the Gen call rate of each sample. Call Rate: Percentage of SNPs (expressed as a decimal) whose GenCall score is greater than the specified threshold.
+```{r}
+#read in data
+DNA_Table<-read.csv("PAWS_psychchip_DNAReport.csv")
+#plot the call rate of each sample, ordered by call rate
+DNA_Table$PsychChip_samp<-seq(1:nrow(DNA_Table))
+ggplot(DNA_Table, aes(reorder(PsychChip_samp, Call_Rate), Call_Rate))+
+  geom_point(shape=19, color="cornflowerblue")+theme_bw()+
+  theme(axis.ticks = element_blank(), axis.text.x = element_blank())+ylim(0,1)+
+  scale_x_discrete("Sample Number",breaks = NULL)
+```
+
+This code plots the 10th percenttile GenCall score as another metic of sample quality, against the Call Rate. p10 GC: 10th percentile GenCall score over all SNPs for this sample. If displayed as 0.000, this column needs to be manually recalculated.
+```{r}
+ggplot(DNA_Table, aes(Call_Rate, X10._GC_Score))+
+  geom_point(shape=19, color="cornflowerblue")+theme_bw()+
+  xlim(0.2,1)+ylim(0.25,0.45)+ylab("10% GenCall")
+```
+
+Illumina suggests samples should be above a 0.8 Call Rate threshold and above a 0.4 10% GenCall threshold.
+
+## Removing Bad Probes
+You will want to filter probes based on Low GC score as in the sample QC step
+```{r}
+PAWS_snps<-read.table("PAWS_psychchip_FinalReport_B_allele_freq.txt", skip=10, sep="\t") #588454 SNPs per sample, need to parse
+colnames(PAWS_snps)<-c("SNP_Name","Sample_ID","GC_Score","B_Allele_Freq","Position","Chr","Allele1","Allele2")
+
+# Pull SNP_Name, Sample_ID, and GC_Score
+PAWS_snps_GC_Score<-PAWS_snps[,c(1,2,3)]
+
+#Reshape into a probe wise format
+PAWS_snps_GC_Score_casted<-cast(PAWS_snps_GC_Score, SNP_Name~Sample_ID)
+save(PAWS_snps_GC_Score_casted, file="PAWS_snps_GCScore.RData")
+```
+
+Load the previous object in if you started a new session between. 
+
+These steps remove probes which:
+*A low (<0.1) average GC Score
+*A oddly high (>0.4) or low (>0.355) 10th percentile GC score (This is losely based on the Illumina recommendation and the histogram in the PAWS data)
+*Probes without an annotate chromosome (PLINK can't deal with no chromosome)
+
+```{r}
+load("PAWS_snps_GCScore.RData")
+
+# Calculate average GC score
+Avg_GC_Score<-rowMeans(PAWS_snps_GC_Score_casted[,2:ncol(PAWS_snps_GC_Score_casted)])
+
+#Calculate the 10th percentile GC score for each SNP
+#p10_SNP - 10th percentile GenCall score over all samples for this SNP (similar to how like genome studio did for each sample)
+quantile(as.numeric(PAWS_snps_GC_Score_casted[2:ncol(PAWS_snps_GC_Score_casted),1]), c(0.1)) #10% of row
+p10_SNP<-as.vector(sapply(1:nrow(PAWS_snps_GC_Score_casted), function(SNP) quantile(as.numeric(PAWS_snps_GC_Score_casted[2:ncol(PAWS_snps_GC_Score_casted),SNP]), c(0.1))))
+save(p10_SNP, file="p10_SNP.RData")
+```
+
+Call which SNPS are bad and filter them out
+```{r}
+load("p10_SNP.RData")
+Filter_p10<-as.character(PAWS_snps_GC_Score_casted$SNP_Name[which(p10_SNP>0.4 | p10_SNP<0.355)]) # rm 12 Probes w low 10%GC
+Filter_avg<-as.character(PAWS_snps_GC_Score_casted$SNP_Name[which(Avg_GC_Score<0.1)]) # rm 19328 Probes w low  average GC 
+
+#Filter SNPS on NA chr
+PAWS_snps<-read.table("PAWS_psychchip_FinalReport_B_allele_freq.txt", skip=10, sep="\t") #588454 SNPs per sample, need to parse
+colnames(PAWS_snps)<-c("SNP_Name","Sample_ID","GC_Score","B_Allele_Freq","Position","Chr","Allele1","Allele2")
+PAWS_snps_chr<-unique(PAWS_snps[,c(1,5,6)])
+Filter_NA<-as.character(PAWS_snps_chr$SNP_Name[which(is.na(PAWS_snps_chr$Chr))])
+
+
+Filter<-unique(c(Filter_avg, Filter_p10,Filter_NA))# total 52151
+
+save(Filter, file="Quality_control_removed_SNPs.RData")
+```
+
+Filter the original data
+```{r}
+PAWS_snps<-read.table("PAWS_psychchip_FinalReport_B_allele_freq.txt", skip=10, sep="\t") #588454 SNPs per sample, need to parse
+colnames(PAWS_snps)<-c("SNP_Name","Sample_ID","GC_Score","B_Allele_Freq","Position","Chr","Allele1","Allele2")
+
+# filter QC'ed
+PAWS_snps_filtered<-PAWS_snps[which(!(PAWS_snps$SNP_Name%in%Filter)),]# 536303 SNPs
+save(PAWS_snps_filtered, file="PAWS_snps_filtered.RData")
+```
+
+
+
+
+# PCA clustering of Genetic Ancestry
+## Interesting but PLINK is our standard
+
+### Reshape the data for use in making PCA cluseting calls and PLINK files
+This analysis uses the b allele frequency as the metric to run PCA on. Where as PLINK uses and AB genotype call. 
+```{r}
+load("PAWS_snps_filtered.RData")
+PAWS_snps_Ballelefreq<-PAWS_snps_filtered[,c(1,2,4)]
+PAWS_snps_casted<-cast(PAWS_snps_Ballelefreq, SNP_Name~Sample_ID)
+save(PAWS_snps_casted, file="PAWS_snps_Ballelefreq.RData")
+```
+
+Cluster into genotypes
+```{r}
+load("PAWS_snps_Ballelefreq.RData")
+
+#read in meta data
+meta<-read.csv("PAWS-GdatasetforKoborlabJuly2014-ID_ordered.csv")
+
+# Remove NAs (if any) with complete.cases for PCA
+SNPs<-PAWS_snps_casted[complete.cases(PAWS_snps_casted),2:ncol(PAWS_snps_casted)] #554034 SNPs
+meta_ordered<-meta[which(meta$PAWSG_ID%in%colnames(SNPs)),]
+meta_ordered<-meta_ordered[match(colnames(SNPs), meta_ordered$PAWSG_ID),]
+```
+
+
+This code runs PCA based genetic cluster calling as in Solovieff BMC genetics 2010
+```{r}
+###PCA then K-means clustering
+PCA<-as.data.frame(unclass(princomp(SNPs)$loadings))
+PCA_full<-princomp(SNPs) #doesn't use SVD use prcomp
+vars <- PCA_full$sdev^2
+Importance<-vars/sum(vars) #Also maybe flip SNPs
+
+## scree
+pca_df<-data.frame(Importance=Importance, PC=seq(1:length(Importance))) #75% of variance accounted for by PC 1
+ggplot(pca_df[which(pca_df$PC<21),],aes(PC,Importance))+geom_bar(stat = "identity",color="black",fill="grey")+theme_bw()+
+  theme(axis.text = element_text(size =12),
+        axis.title = element_text(size =15))+ylab("Variance")+
+  scale_x_continuous(breaks = seq(1,20,1))
+
+
+# which PCs important to ethniccity
+X <- cbind(PCA_full$loadings[,1]) ## only pulled PC 1 for Kmeans clustering because accounted for 75% of the variance
+# could have c binded like 10 PCs if they showed variance
+
+#k-means clustering using principal components to determine the number of clusters to pull
+wss <- (nrow((X))-1)*sum(apply((X),2,var))
+for (i in 2:15) wss[i] <- sum(kmeans((X), 
+                                     centers=i)$withinss)
+plot(1:15, wss, type="b", xlab="Number of Clusters",
+     ylab="Within groups sum of squares")
+
+clust_num<-data.frame(wss=wss, clust_num=1:15)
+ggplot(clust_num, aes(clust_num, wss))+geom_line(color="grey60")+geom_point(shape=19, size=2,color="grey60")+
+  theme_bw()+ylab("Within groups sum of squares")+xlab("Number of Clusters")
+
+# Kmeans
+cl <- kmeans(X,4)
+
+PCA$cluster<-cl$cluster
+
+clustered<-ggplot(PCA,aes(Comp.1,Comp.2, color=as.factor(cluster)))+
+  geom_point(shape=19, size=3)+theme_bw()+scale_color_discrete(name="Genetic Cluster")
+reported<-ggplot(PCA,aes(Comp.1,Comp.2, color=as.factor(meta_ordered$DECHIETH)))+
+  geom_point(shape=19, size=3)+theme_bw()+scale_color_discrete(name="Reported Ethnicity")
+grid.arrange(clustered, reported, ncol=2, widths = c(1, 1), heights = c(4, 4))
+
+#compare clustering types results (heriarchical and kmeans), just kmeans on the snp data how different?
+```
+
+
